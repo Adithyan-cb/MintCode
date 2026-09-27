@@ -1,0 +1,15 @@
+[project]
+name = "minicode"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "dotenv>=0.9.9",
+    "groq>=1.7.0",
+    "rich>=15.0.0",
+    "tavily-python>=0.8.4",
+]
+
+[tool.ruff.lint]
+ignore = ["RUF010"]
