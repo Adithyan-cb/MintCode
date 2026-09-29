@@ -1,6 +1,7 @@
 import json
 import subprocess
-
+from untils import format_process_result
+import os
 from dotenv import load_dotenv
 from tavily import TavilyClient
 from tavily.errors import (
@@ -121,24 +122,33 @@ def web_search(query:str):
         return f"Error: {error}"
 
 def write_file(filename_with_path:str,content:str):
+    path = os.path.abspath(os.path.expanduser(filename_with_path))
     try:
-        with open(filename_with_path,"w") as file:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent,exist_ok=True)
+        with open(path,"w",encoding="utf-8") as file:
             file.write(content)
-        return f"wrote content in {filename_with_path}"
     except PermissionError:
         return f"Permission denied:Cannot write to the location:{filename_with_path}"
     except OSError as e:
        return f"failed to write to file:{e}"
 
+    line_count = content.count("\n") + 1 if content else 0
+    return f"wrote {len(content)} , {line_count} lines to {path}"
+
 def read_file(filename_with_path:str):
     try:
-        with open(filename_with_path,"r") as file:
-            content = file.read()
-            return content
+        with open(filename_with_path,"r",encoding="utf-8") as file:
+            return file.read()
     except FileNotFoundError:
         return f"file:{filename_with_path}, doesn't exist"
+    except IsADirectoryError:
+        return f"Error:{filename_with_path} is a directory,not a file"
     except PermissionError:
         return f"Don't have permission to read the file:{filename_with_path}"
+    except UnicodeDecodeError:
+        return f"Error:{filename_with_path} is not a text file,it's probably a binary file,Do not try to read it"
     except OSError as e:
         return f"An unexpected OS error occured:{e}"
 
@@ -173,7 +183,7 @@ def run_command(command:list[str],stdin:str | None = None):
     except OSError as error:
         return f"Error running command: {error}"
 
-    return result.stdout
+    return format_process_result(result)
 
 available_tools = {
     "web_search":web_search,
@@ -184,10 +194,28 @@ available_tools = {
 
 
 ########### TOOL EXECUTION CODE ################
-def execute_tool_call(tool_call):
+def execute_tool_call(tool_call)-> str:
     """parse and execute a single tool"""
     function_name = tool_call.function.name
-    function_to_call = available_tools[function_name]
-    function_args = json.loads(tool_call.function.arguments)
+    function_to_call = available_tools.get(function_name)
 
-    return function_to_call(**function_args)
+    if function_to_call is None:
+        return f"Error:unknown tool[{function_name}], available tools:{','.join(available_tools)}"
+
+
+    try:
+        function_args = json.loads(tool_call.function.arguments or "{}")
+    except json.JSONDecodeError as error:
+        return f"Error:arguments for function:{function_name} is not vaild JSON({error}), please retry with vaild JSON object"
+
+    if not isinstance(function_args,dict):
+        return f"Error:arguments for {function_name} should be a JSON object"
+
+    try:
+        result = function_to_call(**function_args)
+    except TypeError as error:
+        return f"Error:wrong argument for {function_name} , error:{error}"
+    except Exception as error:
+        return f"Error:an error occured while running {function_name} , error type:{type(error).__name__} , error:{error}"
+
+    return str(result)
