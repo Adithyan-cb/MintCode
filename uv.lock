@@ -283,7 +283,7 @@ wheels = [
 ]
 
 [[package]]
-name = "minicode"
+name = "mintcode"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
