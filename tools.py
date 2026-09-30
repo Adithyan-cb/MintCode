@@ -1,7 +1,7 @@
 import json
 import fnmatch
 import subprocess
-from untils import format_process_result
+from utils import format_process_result
 import os
 from dotenv import load_dotenv
 from tavily import TavilyClient

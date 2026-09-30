@@ -127,12 +127,12 @@ class TokenCounter:
         return cost
 
     def report(self)->str:
-        return f"API calls:{self.turns}||input:{self.input_token}||output:{self.output_token}"
+        return f"[italic #56E39F]API calls:{self.turns}||input:{self.input_token}||output:{self.output_token}[/ italic #56E39F]"
 
-COMMAND_HELP = """
+COMMAND_HELP = """[#56E39F]
 -> /exit : exit the from MintCode
 -> /clear : Clear conversation history
-"""
+[/]"""
 class Status(Enum):
     QUIT = 1
     HANDLED = 2
@@ -145,12 +145,12 @@ def handle_slash_commands(user_input:str,messages:list[dict],token_counter_obj)-
 
     if user_input == "/clear":
         messages[:] = [{"role":"system","content":SYSTEM_PROMPT}]
-        print("[dim] conversation history cleared[/]")
+        print("[italic dim] conversation history cleared[/]")
         return Status.HANDLED
 
 
     if user_input == "/help":
-        print(f"[yellow]{COMMAND_HELP}[/]")
+        print(COMMAND_HELP)
         return Status.HANDLED
 
     if user_input == "/tokens":
