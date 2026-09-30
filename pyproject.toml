@@ -9,6 +9,7 @@ dependencies = [
     "groq>=1.7.0",
     "rich>=15.0.0",
     "tavily-python>=0.8.4",
+    "textual>=8.2.8",
 ]
 
 [tool.ruff.lint]
