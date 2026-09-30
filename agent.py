@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-from untils import stream_model,message_to_dict,handle_slash_commands,TokenCounter,Status
+from untils import stream_model,message_to_dict,handle_slash_commands,TokenCounter,Status,check_context_budget,compact_messages
 from rich import print
 from rich.console import Console
 from groq import Groq
@@ -61,6 +61,9 @@ while True:
 
     messages.append({"role":"user","content":usr_input})
 
+    if check_context_budget(messages=messages):
+         compact_messages(messages=messages,client=client,model=MODEL)
+
     for _ in range(MAX_ITERATIONS):
         on_text = StreamPrinter(console)
 
@@ -107,6 +110,10 @@ while True:
                 "name":tool_call.function.name,
                 "content":str(function_response)
             })
+
+        if check_context_budget(messages=messages):
+            compact_messages(messages=messages,client=client,model=MODEL)
+
     if not reached_answer and not api_failed:
         print(f"[yellow] Stopped after {MAX_ITERATIONS} tool iterations wihtout a final answer.Rephrase or break the task into smaller steps[/]")
 
