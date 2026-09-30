@@ -160,3 +160,81 @@ def handle_slash_commands(user_input:str,messages:list[dict],token_counter_obj)-
 
 
     return Status.PROCEED
+
+
+CHARS_PER_TOKEN = 3.6
+CONTEXT_LIMIT_TOKENS = 131000
+WARN_AT_FRACTION = 0.80
+
+def estimate_tokens(messages:list[dict])->int:
+
+    tokens = 0
+    for message in messages:
+        tokens += len(str(message.get("content")or "")) // 4
+        for call in message.get("tool_calls") or []:
+            function = call.get("function",{})
+            tokens += len(function.get("name","")) + len(function.get("arguments","") or "")
+    return tokens
+
+def check_context_budget(messages:list[dict]):
+     tokens = estimate_tokens(messages=messages)
+     fraction = tokens / CONTEXT_LIMIT_TOKENS
+
+     return fraction >= WARN_AT_FRACTION
+
+
+KEEP_RECENT_MESSAGES = 12
+
+def compact_messages(messages:list[dict],client,model):
+
+    system_message = [message for message in messages if message["role"] == "system"]
+    recent_messages = messages[-KEEP_RECENT_MESSAGES:]
+    while recent_messages and recent_messages[0]["role"] == "tool":
+           recent_messages = recent_messages[1:]
+    older_messages = messages[len(system_message):-KEEP_RECENT_MESSAGES]
+
+    if not older_messages:
+        return messages
+
+    transcript_parts = []
+    for message in older_messages:
+        line = f"{message['role']}: {str(message.get('content') or '')[:2000]}"
+        for call in message.get("tool_calls") or []:
+            function = call.get("function",{})
+            name = function.get("name","")
+            arguments = str(function.get("arguments","") or "")[:2000]
+            line += f" [called {name} {arguments}]"
+        transcript_parts.append(line)
+
+    transcript = "\n".join(transcript_parts)
+
+    summary = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Summarize this conversation between a user and a coding agent. "
+                        "Keep: the user's goal, decisions made, files created or changed, "
+                        "commands run and their results, and anything still unresolved. "
+                        "Drop: exact code listings and tool output. Be under 400 words."
+                    ),
+                },
+                {"role": "user", "content": transcript},
+            ],
+            reasoning_format="hidden",
+            max_tokens=1000,
+        ).choices[0].message.content
+
+    messages[:] = (
+           system_message
+           + [
+               {
+                   "role": "user",
+                   "content": f"[Summary of earlier conversation]\n{summary}",
+               }
+           ]
+           + recent_messages
+       )
+
+    return messages
