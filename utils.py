@@ -132,6 +132,7 @@ class TokenCounter:
 COMMAND_HELP = """[#56E39F]
 -> /exit : exit the from MintCode
 -> /clear : Clear conversation history
+-> /tokens : show API calls and token usage
 [/]"""
 class Status(Enum):
     QUIT = 1
