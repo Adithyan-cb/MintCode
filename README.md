@@ -4,7 +4,7 @@ A terminal coding agent. It reads and writes files, searches your codebase, runs
 shell commands, and looks things up on the web, all from an interactive REPL
 powered by a reasoning model running on [Groq](https://console.groq.com).
 
-cick here to watch demo video: [demo video](https://youtu.be/hIazXb-en2c)
+click here to watch demo video: [demo video](https://youtu.be/hIazXb-en2c)
 
 ## Features
 
