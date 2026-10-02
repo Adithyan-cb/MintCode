@@ -1,3 +1,5 @@
+import json
+
 from dotenv import load_dotenv
 from groq import Groq,APIConnectionError,APIStatusError,RateLimitError
 import time
@@ -11,6 +13,24 @@ from groq.types.chat import ChatCompletionMessage,ChatCompletionMessageToolCall
 from groq.types.chat.chat_completion_message_tool_call import Function
 
 
+class ContextTooLargeError(RuntimeError):
+    """The request was rejected for exceeding the per-minute input token budget."""
+
+
+def is_oversized_request(error:APIStatusError) -> bool:
+    """True when groq refused the request because it was too large.
+
+    Retrying cannot help, the same payload is just as large on the next attempt.
+    """
+    if getattr(error,"status_code",None) == 413:
+        return True
+
+    body = getattr(error,"body",None)
+    detail = body.get("error",{}) if isinstance(body,dict) else {}
+
+    return detail.get("code") == "rate_limit_exceeded" and detail.get("type") == "tokens"
+
+
 def call_model(client,**kwargs):
     MAX_RETRIES = 5
     BASE_BACKOFF_SECONDS = 1.0
@@ -18,12 +38,19 @@ def call_model(client,**kwargs):
     for attempt in range(MAX_RETRIES):
         try:
             return client.chat.completions.create(**kwargs)
-        except RateLimitError:
+        except (RateLimitError,APIStatusError) as error:
+            if is_oversized_request(error):
+                raise ContextTooLargeError(
+                    "the request is over the model's per-minute input token budget,"
+                    " so the conversation has to shrink before it can be sent again"
+                ) from None
             if attempt == MAX_RETRIES - 1:
-                raise RuntimeError("limit reached,wait and try again")
-        except (APIConnectionError,APIStatusError) as error:
-            if attempt == MAX_RETRIES - 1:
+                if isinstance(error,RateLimitError):
+                    raise RuntimeError("limit reached,wait and try again") from None
                 raise RuntimeError(f"API call failed:{error}") from None
+        except APIConnectionError:
+            if attempt == MAX_RETRIES - 1:
+                raise RuntimeError("API call failed:could not reach groq") from None
 
         delay = BASE_BACKOFF_SECONDS * (2**attempt)
         print(f"[yellow]API error,retrying in {delay:.0f}s (attempt:{attempt+1})[/]")
@@ -164,38 +191,97 @@ def handle_slash_commands(user_input:str,messages:list[dict],token_counter_obj)-
 
 
 CHARS_PER_TOKEN = 3.6
-CONTEXT_LIMIT_TOKENS = 131000
+# the free tier caps a single request at 7000 input tokens per minute, and the
+# system prompt plus tool schema already spends about 2050 of that before any
+# history is sent, so the budget has to be sized against the limit and not
+# against the model's much larger context window
+CONTEXT_LIMIT_TOKENS = 7000
 WARN_AT_FRACTION = 0.80
 
-def estimate_tokens(messages:list[dict])->int:
+def estimate_tokens(messages:list[dict],tools:list[dict]|None=None)->int:
 
     tokens = 0
     for message in messages:
-        tokens += len(str(message.get("content")or "")) // 4
+        tokens += int(len(str(message.get("content")or "")) / CHARS_PER_TOKEN)
         for call in message.get("tool_calls") or []:
             function = call.get("function",{})
-            tokens += len(function.get("name","")) + len(function.get("arguments","") or "")
+            tokens += int((len(function.get("name","")) + len(function.get("arguments","") or "")) / CHARS_PER_TOKEN)
+
+    # the schema is sent on every request but never appears in the history
+    if tools:
+        tokens += int(len(json.dumps(tools)) / CHARS_PER_TOKEN)
+
     return tokens
 
-def check_context_budget(messages:list[dict]):
-     tokens = estimate_tokens(messages=messages)
+def check_context_budget(messages:list[dict],tools:list[dict]|None=None)->bool:
+     tokens = estimate_tokens(messages=messages,tools=tools)
      fraction = tokens / CONTEXT_LIMIT_TOKENS
 
      return fraction >= WARN_AT_FRACTION
 
 
-KEEP_RECENT_MESSAGES = 12
+COMPACT_AT_TOKENS = int(CONTEXT_LIMIT_TOKENS * WARN_AT_FRACTION)
 
-def compact_messages(messages:list[dict],client,model):
+KEEP_RECENT_MESSAGES = 6
+MAX_TRANSCRIPT_CHARS = 12000
+
+
+def _drop_oldest_turns(body:list[dict])->list[dict]:
+    """Remove the first turn, and any tool replies it produced.
+
+    A tool message is only valid after the assistant call it answers, so the two
+    have to be dropped together or the next request is malformed.
+    """
+    body = list(body)
+
+    # a caller can hand over a window that starts on an orphan tool reply, and
+    # dropping that alone is already enough progress to not also lose a turn
+    orphans = 0
+    while body and body[0]["role"] == "tool":
+        body.pop(0)
+        orphans += 1
+
+    if orphans or not body:
+        return body
+
+    body.pop(0)
+
+    while body and body[0]["role"] == "tool":
+        body.pop(0)
+
+    return body
+
+
+def _trim_to_allowance(body:list[dict],allowance:int)->list[dict]:
+    """Drop whole turns off the front of body until it fits the token allowance."""
+    while body and estimate_tokens(messages=body) > allowance:
+        trimmed = _drop_oldest_turns(body)
+        if len(trimmed) == len(body):
+            break
+        body = trimmed
+
+    return body
+
+
+def compact_messages(messages:list[dict],client,model,tools=None,keep_recent:int=KEEP_RECENT_MESSAGES)->bool:
+    """Shrink the history to fit the request budget. Returns True if it got smaller."""
+
+    before = estimate_tokens(messages=messages,tools=tools)
 
     system_message = [message for message in messages if message["role"] == "system"]
-    recent_messages = messages[-KEEP_RECENT_MESSAGES:]
+    recent_messages = messages[-keep_recent:]
     while recent_messages and recent_messages[0]["role"] == "tool":
            recent_messages = recent_messages[1:]
-    older_messages = messages[len(system_message):-KEEP_RECENT_MESSAGES]
+    older_messages = messages[len(system_message):-keep_recent]
 
     if not older_messages:
-        return messages
+        # nothing to summarize yet, so only the recent window has to give way
+        allowance = COMPACT_AT_TOKENS - estimate_tokens(messages=system_message,tools=tools)
+        trimmed = _trim_to_allowance(recent_messages,allowance)
+        if len(trimmed) < len(recent_messages):
+            messages[:] = system_message + trimmed
+            print(f"[yellow]NOTE:[/]dropped {len(recent_messages) - len(trimmed)} old messages to stay inside the input budget.")
+        return estimate_tokens(messages=messages,tools=tools) < before
 
     transcript_parts = []
     for message in older_messages:
@@ -207,7 +293,12 @@ def compact_messages(messages:list[dict],client,model):
             line += f" [called {name} {arguments}]"
         transcript_parts.append(line)
 
+    # the summarizing call is itself billed against the same per-minute budget,
+    # so the transcript is clipped to keep that request small enough to land
     transcript = "\n".join(transcript_parts)
+    if len(transcript) > MAX_TRANSCRIPT_CHARS:
+        head = MAX_TRANSCRIPT_CHARS // 3
+        transcript = transcript[:head] + "\n[... middle of the conversation dropped ...]\n" + transcript[-(MAX_TRANSCRIPT_CHARS - head):]
 
     summary = client.chat.completions.create(
             model=model,
@@ -227,15 +318,18 @@ def compact_messages(messages:list[dict],client,model):
             max_tokens=1000,
         ).choices[0].message.content
 
-    messages[:] = (
-           system_message
-           + [
-               {
-                   "role": "user",
-                   "content": f"[Summary of earlier conversation]\n{summary}",
-               }
-           ]
-           + recent_messages
-       )
+    summary_message = {
+        "role":"user",
+        "content":f"[Summary of earlier conversation]\n{summary}",
+    }
 
-    return messages
+    # the summary is the only record of the dropped turns, so it is charged for
+    # first and the recent window absorbs whatever budget is left
+    allowance = COMPACT_AT_TOKENS - estimate_tokens(messages=system_message + [summary_message],tools=tools)
+    trimmed = _trim_to_allowance(recent_messages,allowance)
+
+    messages[:] = system_message + [summary_message] + trimmed
+
+    print(f"[yellow]NOTE:[/]compacted {len(older_messages)} older messages,kept {len(trimmed)} recent.")
+
+    return estimate_tokens(messages=messages,tools=tools) < before

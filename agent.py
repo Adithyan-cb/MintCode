@@ -2,7 +2,7 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from utils import stream_model,message_to_dict,handle_slash_commands,TokenCounter,Status,check_context_budget,compact_messages
+from utils import stream_model,message_to_dict,handle_slash_commands,TokenCounter,Status,check_context_budget,compact_messages,ContextTooLargeError
 from rich import print
 from rich.console import Console
 from groq import Groq
@@ -109,8 +109,8 @@ while True:
 
     messages.append({"role":"user","content":usr_input})
 
-    if check_context_budget(messages=messages):
-         compact_messages(messages=messages,client=client,model=MODEL)
+    if check_context_budget(messages=messages,tools=tools_schema):
+         compact_messages(messages=messages,client=client,model=MODEL,tools=tools_schema)
 
     for _ in range(MAX_ITERATIONS):
         on_text = StreamPrinter(console)
@@ -118,6 +118,16 @@ while True:
         try:
             message,finish_reason,usage = stream_model(client=client,on_text=on_text,model=MODEL,messages=messages,tools=tools_schema,reasoning_format="hidden",max_tokens=4096,top_p=0.80,parallel_tool_calls=True,tool_choice="auto")
             token_counter.add(usage)
+        except ContextTooLargeError as error:
+            on_text.newline()
+            print(f"[italic red]error:{error}[/ italic red]")
+            # the payload itself was refused, so compact and give it one more try
+            if compact_messages(messages=messages,client=client,model=MODEL,tools=tools_schema):
+                print("[yellow]NOTE:[/]history was compacted,retrying.")
+                continue
+            print("[italic red]run /clear to start a fresh conversation[/ italic red]")
+            api_failed = True
+            break
         except RuntimeError as error:
             on_text.newline()
             print(f"[italic red]error:{error}[/ italic red]")
@@ -162,8 +172,8 @@ while True:
                 "content":str(function_response)
             })
 
-        if check_context_budget(messages=messages):
-            compact_messages(messages=messages,client=client,model=MODEL)
+        if check_context_budget(messages=messages,tools=tools_schema):
+            compact_messages(messages=messages,client=client,model=MODEL,tools=tools_schema)
 
     if not reached_answer and not api_failed:
         print(f"[italic yellow] Stopped after {MAX_ITERATIONS} tool iterations wihtout a final answer.Rephrase or break the task into smaller steps[/ italic yellow]")

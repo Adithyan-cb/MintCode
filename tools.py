@@ -20,6 +20,8 @@ load_dotenv()
 COMMAND_TIMEOUT_SECONDS = 30
 DEFAULT_READ_LINES = 400
 MAX_READ_LINES = 2000
+MAX_SEARCH_RESULTS = 5
+MAX_SEARCH_SNIPPET_CHARS = 400
 
 ######### TOOLS SCHEMA ##############
 tools_schema = [
@@ -215,16 +217,38 @@ tools_schema = [
 
 ######### TOOLS ##########
 
-def web_search(query:str):
+def web_search(query:str) -> str:
+    """Search the web and return a compact digest of the results.
+
+    The raw Tavily payload carries fields the model never needs and is far too
+    large to keep in the message history, so only the title, url and a truncated
+    snippet per result survive.
+    """
     client = TavilyClient()
     try:
         response = client.search(
             query=query,
-            search_depth="basic"
+            search_depth="basic",
+            max_results=MAX_SEARCH_RESULTS
         )
-        return response
     except (BadRequestError,ForbiddenError,InvalidAPIKeyError,OSError,TavilyKeylessLimitError,TavilyTimeoutError,UsageLimitExceededError,) as error:
         return f"Error: {error}"
+
+    results = (response or {}).get("results") or []
+
+    if not results:
+        return f"No results found for '{query}'."
+
+    lines = []
+    for number,result in enumerate(results,start=1):
+        title = " ".join(str(result.get("title") or "").split())
+        url = str(result.get("url") or "").strip()
+        snippet = " ".join(str(result.get("content") or "").split())
+        if len(snippet) > MAX_SEARCH_SNIPPET_CHARS:
+            snippet = snippet[:MAX_SEARCH_SNIPPET_CHARS].rstrip() + "..."
+        lines.append(f"{number}. {title}\n   {url}\n   {snippet}")
+
+    return f"web_search results for '{query}':\n" + "\n".join(lines)
 
 def write_file(filename_with_path:str,content:str):
     path = os.path.abspath(os.path.expanduser(filename_with_path))
@@ -436,6 +460,8 @@ available_tools = {
     "write_file": write_file,
     "edit_file": edit_file,
     "run_command": run_command,
+    "glob": glob,
+    "grep": grep,
 }
 
 
